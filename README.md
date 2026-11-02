@@ -1,25 +1,8 @@
 # SocialPilot – Social Media Management Platform
 
+SocialPilot is a full-stack social media management platform that helps users connect social accounts, create and manage posts, schedule content, organize campaigns, and monitor publishing activity from one dashboard.
 
-## Demo data
-
-To populate the database with mock campaigns, social accounts, and scheduled posts for an existing user, run:
-
-```bash
-cd backend
-./.venv/Scripts/python.exe seed_demo.py --email your-user@example.com
-```
-
-This creates sample Facebook, Instagram, and LinkedIn records plus a few campaign and post states so the dashboard, planner, and analytics views have realistic data to work with. The demo accounts are intentionally created without real tokens.
-
-## X account connection
-=======
-## Overview
-origin/Kavya-M-Arali
-
-**SocialPilot** is a full-stack social media management platform that allows users to connect their social media accounts, create and manage posts, schedule content, manage campaigns, and monitor publishing activities from a centralized dashboard.
-
-The project is built using **React.js** for the frontend, **FastAPI** for the backend, and **PostgreSQL** for database management.
+The frontend is built with React and Vite, the backend uses FastAPI and SQLAlchemy, and PostgreSQL stores application data.
 
 ## 🚀 Features
 
@@ -159,7 +142,7 @@ export to the authenticated user's posts and their owned accounts and
 campaigns. Platform engagement columns are marked `Data unavailable` until
 real metrics are stored; export rows do not include post content, credentials,
 or tokens.
-=======
+
 Navigate to the backend:
 
 ```bash
@@ -400,4 +383,14 @@ The project follows basic security practices including:
 - Environment variables for credentials
 - OAuth-based social account authentication
 - CORS configuration
->>>>>>> origin/Kavya-M-Arali
+
+## Demo data
+
+To populate the database with mock campaigns, social accounts, and scheduled posts for an existing user, run:
+
+```bash
+cd backend
+./.venv/Scripts/python.exe seed_demo.py --email your-user@example.com
+```
+
+This creates sample Facebook, Instagram, and LinkedIn records plus a few campaign and post states so the dashboard, planner, and analytics views have realistic data to work with. The demo accounts are intentionally created without real tokens.
