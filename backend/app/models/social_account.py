@@ -54,3 +54,8 @@ class SocialAccount(Base):
         "User",
         backref="social_accounts"
     )
+    follower_snapshots = relationship(
+        "FollowerSnapshot",
+        back_populates="social_account",
+        cascade="all, delete-orphan",
+    )

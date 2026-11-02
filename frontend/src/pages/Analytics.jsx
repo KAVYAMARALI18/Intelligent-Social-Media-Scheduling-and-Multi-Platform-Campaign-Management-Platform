@@ -98,34 +98,37 @@ function Analytics() {
     const advancedQuery = new URLSearchParams(query);
     const headers = { Authorization: `Bearer ${token}` };
 
-    Promise.all([
-      fetch(`${API_URL}/analytics/overview?${query}`, { headers }),
-      fetch(`${API_URL}/analytics/engagement?${query}&metric=${filters.metric}`, { headers }),
-      fetch(`${API_URL}/analytics/audience?${query}`, { headers }),
-      fetch(`${API_URL}/analytics/campaigns?${query}`, { headers }),
-      fetch(`${API_URL}/analytics/roi${filters.campaign === "all" ? "" : `?campaign_id=${filters.campaign}`}`, { headers }),
-      fetch(`${API_URL}/analytics/advanced?${advancedQuery}`, { headers }),
-    ])
-      .then(async (responses) => {
-        if (responses.some((response) => response.status === 401)) {
+    const requests = [
+      { name: "overview", request: fetch(`${API_URL}/analytics/overview?${query}`, { headers }), update: setOverview },
+      { name: "engagement", request: fetch(`${API_URL}/analytics/engagement?${query}&metric=${filters.metric}`, { headers }), update: setEngagement },
+      { name: "audience", request: fetch(`${API_URL}/analytics/audience?${query}`, { headers }), update: setAudience },
+      { name: "campaign performance", request: fetch(`${API_URL}/analytics/campaigns?${query}`, { headers }), update: (data) => setPerformance(data.campaigns || []) },
+      { name: "ROI", request: fetch(`${API_URL}/analytics/roi${filters.campaign === "all" ? "" : `?campaign_id=${filters.campaign}`}`, { headers }), update: setRoi },
+      { name: "post analytics", request: fetch(`${API_URL}/analytics/advanced?${advancedQuery}`, { headers }), update: setAdvanced },
+    ];
+
+    Promise.all(requests.map(async ({ name, request, update }) => {
+      try {
+        const response = await request;
+        if (response.status === 401) return { name, unauthorized: true };
+        if (!response.ok) return { name, error: true };
+        return { name, update, data: await response.json() };
+      } catch {
+        return { name, error: true };
+      }
+    }))
+      .then((results) => {
+        if (results.some((result) => result.unauthorized)) {
           localStorage.removeItem("access_token");
           navigate("/login", { replace: true });
-          return null;
+          return;
         }
-        const failed = responses.find((response) => !response.ok);
-        if (failed) throw new Error("Could not load analytics data.");
-        return Promise.all(responses.map((response) => response.json()));
+        results.forEach((result) => {
+          if (result.data) result.update(result.data);
+        });
+        const failed = results.filter((result) => result.error).map((result) => result.name);
+        setError(failed.length ? `Could not load ${failed.join(", ")} analytics data.` : "");
       })
-      .then((data) => {
-        if (!data) return;
-        setOverview(data[0]);
-        setEngagement(data[1]);
-        setAudience(data[2]);
-        setPerformance(data[3].campaigns || []);
-        setRoi(data[4]);
-        setAdvanced(data[5]);
-      })
-      .catch((requestError) => setError(requestError.message || "Could not connect to SocialPilot."))
       .finally(() => setLoading(false));
   }, [dates, filters.campaign, filters.metric, filters.platform, navigate]);
 
@@ -299,7 +302,7 @@ function Analytics() {
           ["Scheduled posts", advanced?.summary?.scheduled_posts],
           ["Failed posts", advanced?.summary?.failed_posts],
           ["Instagram likes", engagement?.metrics?.likes],
-          ["Total engagement", advanced?.summary?.engagement_available ? advanced.summary.total_engagement : null],
+          ["Total engagement", overview?.engagement],
         ].map(([label, value]) => <article className="analytics-kpi" key={label}>
           <span>{label}</span><strong>{number(value)}</strong>
         </article>)}
@@ -327,7 +330,7 @@ function Analytics() {
 
         <article className="analytics-panel advanced-chart-card">
           <div className="analytics-panel-heading"><div><p className="eyebrow">ENGAGEMENT</p><h2>Engagement over time</h2></div></div>
-          <p className="data-note">Historical engagement snapshots are not stored. Current Instagram likes and comments are shown by post publication date below.</p>
+          <p className="data-note">Historical engagement charts use daily provider snapshots. Current Instagram likes and comments are shown in the summary when available.</p>
         </article>
 
         <article className="analytics-panel advanced-chart-card">
@@ -366,7 +369,7 @@ function Analytics() {
       </section>
 
       <section className="analytics-panel engagement-panel">
-        <div className="analytics-panel-heading"><div><p className="eyebrow">ENGAGEMENT ANALYTICS</p><h2>{metricLabel} over time</h2></div><span>{RANGES[filters.range]}</span></div>
+        <div className="analytics-panel-heading"><div><p className="eyebrow">ENGAGEMENT ANALYTICS</p><h2>{metricLabel} over time</h2></div><span>{engagement?.last_synced_at ? `Last synced ${new Date(engagement.last_synced_at).toLocaleString()}` : RANGES[filters.range]}</span></div>
         {timeline.length ? <div className="timeline-chart" role="img" aria-label={`${metricLabel} over time`}>
           {timeline.map((point) => <div className="timeline-column" key={point.date}>
             <strong>{number(point[chartMetric])}</strong><div className="timeline-track"><span style={{ height: `${Math.max(4, (point[chartMetric] / peak) * 100)}%` }} /></div><small>{point.date.slice(5)}</small>
@@ -387,6 +390,7 @@ function Analytics() {
           {[["Current followers", audience?.current_followers], ["New followers", audience?.new_followers], ["Lost followers", audience?.lost_followers], ["Net growth", audience?.net_growth], ["Growth", audience?.growth_percentage == null ? null : `${audience.growth_percentage}%`]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{typeof value === "string" ? value : number(value)}</strong></div>)}
         </div>
         {!audience?.available && <p className="data-note">{audience?.message || "Follower history is not available yet."}</p>}
+        {audience?.last_synced_at && <p className="data-note">Last follower snapshot: {new Date(audience.last_synced_at).toLocaleDateString()}</p>}
       </section>
 
       <section className="analytics-panel performance-panel">

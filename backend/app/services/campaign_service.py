@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -9,68 +9,66 @@ from app.schemas.campaign import CampaignCreate, CampaignStatus, CampaignUpdate
 
 
 CAMPAIGN_TRACKING_WORKFLOW = ["Draft", "Scheduled", "Active", "Completed"]
-PLATFORM_ENGAGEMENT_WEIGHTS = {
-    "facebook": {"reach": 240, "impressions": 540, "likes": 26, "comments": 9, "shares": 6, "clicks": 12, "views": 420},
-    "instagram": {"reach": 310, "impressions": 680, "likes": 34, "comments": 12, "shares": 8, "clicks": 14, "views": 540},
-    "linkedin": {"reach": 200, "impressions": 440, "likes": 18, "comments": 8, "shares": 7, "clicks": 11, "views": 360},
-    "youtube": {"reach": 420, "impressions": 760, "likes": 30, "comments": 10, "shares": 9, "clicks": 16, "views": 640},
-    "default": {"reach": 180, "impressions": 360, "likes": 16, "comments": 6, "shares": 4, "clicks": 8, "views": 300},
-}
-
-
-def _get_platform_weights(post) -> dict:
-    social_account = getattr(post, "social_account", None)
-    platform_name = getattr(social_account, "platform", None) or "default"
-    normalized = str(platform_name).lower()
-    return PLATFORM_ENGAGEMENT_WEIGHTS.get(normalized, PLATFORM_ENGAGEMENT_WEIGHTS["default"])
+POST_METRIC_NAMES = (
+    "reach",
+    "impressions",
+    "likes",
+    "comments",
+    "shares",
+    "clicks",
+    "views",
+    "engagement",
+)
 
 
 def _get_post_performance(post) -> dict:
-    weights = _get_platform_weights(post)
-    scale = 1 + max(0, len((getattr(post, "content", "") or "").split()) // 12)
-    likes = int(weights["likes"] * scale)
-    comments = int(weights["comments"] * scale)
-    shares = int(weights["shares"] * scale)
-    clicks = int(weights["clicks"] * scale)
-    reach = int(weights["reach"] * scale)
-    impressions = int(weights["impressions"] * scale)
-    views = int(weights["views"] * scale)
-
-    return {
-        "reach": reach,
-        "impressions": impressions,
-        "likes": likes,
-        "comments": comments,
-        "shares": shares,
-        "clicks": clicks,
-        "views": views,
-        "engagement": likes + comments + shares + clicks,
-    }
+    snapshots = list(getattr(post, "metric_snapshots", []) or [])
+    if not snapshots:
+        return {name: None for name in POST_METRIC_NAMES}
+    latest = max(
+        snapshots,
+        key=lambda snapshot: (
+            getattr(snapshot, "snapshot_date", date.min),
+            str(getattr(snapshot, "captured_at", "") or ""),
+        ),
+    )
+    values = {name: getattr(latest, name, None) for name in POST_METRIC_NAMES}
+    if values["engagement"] is None and (
+        values["likes"] is not None and values["comments"] is not None
+    ):
+        values["engagement"] = values["likes"] + values["comments"]
+    return values
 
 
 def build_campaign_analytics(campaigns: list[Campaign], posts: list) -> dict:
-    """Summarize reach, engagement, and performance metrics across the supplied campaigns."""
-    metrics = {"reach": 0, "impressions": 0, "likes": 0, "comments": 0, "shares": 0, "clicks": 0, "views": 0}
-    total_engagement = 0
+    """Aggregate the latest recorded post metrics; missing values stay unavailable."""
+    totals = {name: 0 for name in POST_METRIC_NAMES}
+    observed = {name: False for name in POST_METRIC_NAMES}
 
     for post in posts:
         if str(getattr(post, "status", "")).lower() != "published":
             continue
         performance = _get_post_performance(post)
-        metrics["reach"] += performance["reach"]
-        metrics["impressions"] += performance["impressions"]
-        metrics["likes"] += performance["likes"]
-        metrics["comments"] += performance["comments"]
-        metrics["shares"] += performance["shares"]
-        metrics["clicks"] += performance["clicks"]
-        metrics["views"] += performance["views"]
+        for name in POST_METRIC_NAMES:
+            if performance[name] is not None:
+                totals[name] += performance[name]
+                observed[name] = True
 
-    total_engagement = metrics["likes"] + metrics["comments"] + metrics["shares"] + metrics["clicks"]
-    engagement_rate = round((total_engagement / metrics["reach"]) * 100, 2) if metrics["reach"] else 0
+    metrics = {
+        name: totals[name] if observed[name] else None
+        for name in POST_METRIC_NAMES
+    }
+    engagement_rate = (
+        round((metrics["engagement"] / metrics["reach"]) * 100, 2)
+        if metrics["engagement"] is not None
+        and metrics["reach"] is not None
+        and metrics["reach"] > 0
+        else None
+    )
 
     return {
         **metrics,
-        "total_engagement": total_engagement,
+        "total_engagement": metrics["engagement"],
         "engagement_rate": engagement_rate,
     }
 
@@ -105,65 +103,154 @@ def build_campaign_tracking(campaign: Campaign) -> dict:
 def build_campaign_comparison(campaigns: list[Campaign]) -> dict:
     """Compare multiple campaigns by cost, revenue, reach, engagement, and ROI."""
     comparison_rows = []
-    total_cost = 0.0
-    total_revenue = 0.0
+    observed_costs = []
 
     for campaign in campaigns:
         posts = list(getattr(campaign, "posts", []) or [])
         published_posts = [post for post in posts if str(getattr(post, "status", "")).lower() == "published"]
         analytics = build_campaign_analytics([campaign], published_posts)
-        cost = float(campaign.budget or 0)
-        reach = analytics["reach"]
-        engagement = analytics["total_engagement"]
-        impressions = analytics["impressions"]
-        revenue = max(cost, reach * 0.18 + impressions * 0.05 + engagement * 7.5)
-        roi = ((revenue - cost) / cost * 100) if cost > 0 else 0.0
+        cost = float(campaign.budget) if campaign.budget is not None else None
+        if cost is not None:
+            observed_costs.append(cost)
 
         row = {
             "campaign_id": campaign.id,
             "name": campaign.name,
             "status": getattr(campaign, "status", "Draft"),
-            "budget": round(cost, 2),
-            "cost": round(cost, 2),
-            "revenue": round(revenue, 2),
-            "roi": round(roi, 2),
-            "reach": reach,
-            "engagement": engagement,
-            "impressions": impressions,
+            "budget": round(cost, 2) if cost is not None else None,
+            "cost": round(cost, 2) if cost is not None else None,
+            "revenue": None,
+            "roi": None,
+            "reach": analytics["reach"],
+            "engagement": analytics["total_engagement"],
+            "impressions": analytics["impressions"],
             "published_posts": len(published_posts),
             "total_posts": len(posts),
             "engagement_rate": analytics["engagement_rate"],
             "performance": round((len(published_posts) / len(posts) * 100), 2) if posts else 0.0,
         }
         comparison_rows.append(row)
-        total_cost += cost
-        total_revenue += revenue
 
-    best_campaign = max(comparison_rows, key=lambda item: item["roi"], default={
+    best_campaign = {
         "campaign_id": None,
         "name": "N/A",
-        "roi": 0,
-    })
-    average_roi = round(sum(item["roi"] for item in comparison_rows) / len(comparison_rows), 2) if comparison_rows else 0.0
+        "roi": None,
+    }
 
     return {
         "summary": {
             "total_campaigns": len(comparison_rows),
-            "total_cost": round(total_cost, 2),
-            "total_revenue": round(total_revenue, 2),
-            "average_roi": average_roi,
+            "total_cost": round(sum(observed_costs), 2) if observed_costs else None,
+            "total_revenue": None,
+            "average_roi": None,
             "best_campaign": {
                 "campaign_id": best_campaign.get("campaign_id"),
                 "name": best_campaign.get("name"),
-                "roi": best_campaign.get("roi", 0),
+                "roi": best_campaign.get("roi"),
             },
         },
         "comparison": comparison_rows,
     }
 
 
+def _campaign_audience_metrics(campaign: Campaign, posts: list) -> dict:
+    accounts = {
+        account.id: account
+        for account in list(getattr(campaign, "social_accounts", []) or [])
+        if account.id is not None
+        and (getattr(account, "platform", "") or "").lower() == "instagram"
+    }
+    for post in posts:
+        account = getattr(post, "social_account", None)
+        if (
+            account
+            and account.id is not None
+            and (getattr(account, "platform", "") or "").lower() == "instagram"
+        ):
+            accounts[account.id] = account
+
+    account_snapshots = {}
+    for account_id, account in accounts.items():
+        snapshots = sorted(
+            (
+                snapshot
+                for snapshot in list(getattr(account, "follower_snapshots", []) or [])
+                if (
+                    getattr(campaign, "start_date", None) is None
+                    or snapshot.snapshot_date >= campaign.start_date
+                )
+                and (
+                    getattr(campaign, "end_date", None) is None
+                    or snapshot.snapshot_date <= campaign.end_date
+                )
+            ),
+            key=lambda snapshot: snapshot.snapshot_date,
+        )
+        if snapshots:
+            account_snapshots[account_id] = {
+                snapshot.snapshot_date: snapshot.followers_count
+                for snapshot in snapshots
+            }
+
+    current_followers = None
+    net_growth = None
+    growth_percentage = None
+    timeline = []
+    if accounts and len(account_snapshots) == len(accounts):
+        current_followers = sum(
+            max(values.items())[1] for values in account_snapshots.values()
+        )
+        shared_dates = set.intersection(
+            *(set(values) for values in account_snapshots.values())
+        )
+        ordered_dates = sorted(shared_dates)
+        if len(ordered_dates) >= 2:
+            for snapshot_date in ordered_dates:
+                total = sum(
+                    values[snapshot_date] for values in account_snapshots.values()
+                )
+                previous = timeline[-1]["followers"] if timeline else None
+                timeline.append({
+                    "date": snapshot_date.isoformat(),
+                    "followers": total,
+                    "new_followers": (
+                        max(total - previous, 0) if previous is not None else None
+                    ),
+                    "net_growth": total - previous if previous is not None else None,
+                    "growth_percentage": (
+                        round((total - previous) / previous * 100, 2)
+                        if previous
+                        else None
+                    ),
+                })
+            starting_followers = timeline[0]["followers"]
+            ending_followers = timeline[-1]["followers"]
+            net_growth = ending_followers - starting_followers
+            growth_percentage = (
+                round(net_growth / starting_followers * 100, 2)
+                if starting_followers
+                else None
+            )
+
+    return {
+        "current_followers": current_followers,
+        "net_growth": net_growth,
+        "new_followers": max(net_growth, 0) if net_growth is not None else None,
+        "lost_followers": max(-net_growth, 0) if net_growth is not None else None,
+        "growth_percentage": growth_percentage,
+        "timeline": timeline,
+        "message": (
+            "Follower history is not available until snapshots are collected."
+            if current_followers is None
+            else "Follower growth requires snapshots on at least two matching dates."
+            if net_growth is None
+            else "Follower growth is calculated from recorded account snapshots."
+        ),
+    }
+
+
 def build_campaign_report(campaign: Campaign) -> dict:
-    """Generate a concise, human-readable campaign report with audience growth and content performance insights."""
+    """Build a campaign report only from stored post and follower snapshots."""
     tracking = build_campaign_tracking(campaign)
     posts = list(getattr(campaign, "posts", []) or [])
     total_posts = tracking["total_posts"]
@@ -186,76 +273,31 @@ def build_campaign_report(campaign: Campaign) -> dict:
     engagement = analytics["total_engagement"]
     performance = round((tracking["published_posts"] / total_posts * 100), 2) if total_posts else 0.0
 
-    baseline_followers = max(1500, len(getattr(campaign, "social_accounts", []) or []) * 250 + len(published_posts) * 180)
-    audience_timeline = []
-    if start_date:
-        total_days = max((end_date - start_date).days if start_date and end_date else 0, 1)
-        sample_points = 4 if total_days > 3 else max(2, total_days + 1)
-        date_points = []
-        if sample_points <= 1:
-            date_points = [start_date]
-        else:
-            step = total_days / (sample_points - 1)
-            for index in range(sample_points):
-                offset = round(index * step)
-                date_points.append(start_date + timedelta(days=offset))
-        if end_date and date_points and date_points[-1] != end_date:
-            date_points[-1] = end_date
-
-        previous_followers = baseline_followers
-        for index, target_date in enumerate(date_points):
-            cumulative_engagement = 0
-            for post in published_posts:
-                post_date = getattr(post, "published_at", None)
-                if isinstance(post_date, datetime):
-                    post_date = post_date.date()
-                if post_date and post_date <= target_date:
-                    cumulative_engagement += sum(_get_post_performance(post)[key] for key in ("likes", "comments", "shares", "clicks"))
-            follower_count = baseline_followers + int(cumulative_engagement * 0.7)
-            new_followers = max(0, follower_count - previous_followers)
-            follower_growth = follower_count - baseline_followers
-            growth_percentage = round((new_followers / previous_followers) * 100, 2) if previous_followers else 0.0
-            audience_timeline.append({
-                "date": target_date.strftime("%b %d"),
-                "followers": follower_count,
-                "new_followers": new_followers,
-                "total_followers": follower_count,
-                "follower_growth": follower_growth,
-                "growth_percentage": growth_percentage,
-                "reach": int(reach * (index + 1) / max(len(date_points), 1)),
-                "impressions": int(impressions * (index + 1) / max(len(date_points), 1)),
-            })
-            previous_followers = follower_count
-    if not audience_timeline:
-        total_followers = baseline_followers + max(0, len(published_posts) * 90)
-        audience_timeline = [{
-            "date": "Campaign Start",
-            "followers": total_followers,
-            "new_followers": max(0, total_followers - baseline_followers),
-            "total_followers": total_followers,
-            "follower_growth": max(0, total_followers - baseline_followers),
-            "growth_percentage": round((max(0, total_followers - baseline_followers) / baseline_followers) * 100, 2) if baseline_followers else 0.0,
-            "reach": reach,
-            "impressions": impressions,
-        }]
-
-    total_followers = audience_timeline[-1]["followers"]
-    new_followers = max(0, total_followers - baseline_followers)
-    follower_growth = total_followers - baseline_followers
-    growth_percentage = round((new_followers / baseline_followers) * 100, 2) if baseline_followers else 0.0
+    audience = _campaign_audience_metrics(campaign, posts)
+    total_followers = audience["current_followers"]
+    new_followers = audience["new_followers"]
+    lost_followers = audience["lost_followers"]
+    follower_growth = audience["net_growth"]
+    growth_percentage = audience["growth_percentage"]
+    audience_timeline = audience["timeline"]
 
     top_performing_content = []
     for post in published_posts:
         performance_summary = _get_post_performance(post)
+        if performance_summary["engagement"] is None:
+            continue
         top_performing_content.append({
             "content": post.content[:90],
             "platform": getattr(getattr(post, "social_account", None), "platform", "unknown"),
             "published_at": getattr(post, "published_at", None).isoformat() if getattr(post, "published_at", None) else None,
-            "engagement_score": performance_summary["likes"] + performance_summary["comments"] + performance_summary["shares"] + performance_summary["clicks"],
+            "engagement_score": performance_summary["engagement"],
             "reach": performance_summary["reach"],
             "impressions": performance_summary["impressions"],
         })
     top_performing_content = sorted(top_performing_content, key=lambda item: item["engagement_score"], reverse=True)[:3]
+
+    def report_value(value):
+        return f"{value:,}" if value is not None else "Not available"
 
     report_text = (
         "Campaign Report\n"
@@ -266,13 +308,14 @@ def build_campaign_report(campaign: Campaign) -> dict:
         f"Total Posts:        {total_posts}\n"
         f"Published:          {tracking['published_posts']}\n"
         f"Failed:             {failed_posts}\n"
-        f"Reach:              {reach:,}\n"
-        f"Impressions:        {impressions:,}\n"
-        f"Engagement:         {engagement:,}\n"
-        f"New Followers:      {new_followers:,}\n"
-        f"Total Followers:    {total_followers:,}\n"
-        f"Follower Growth:    {follower_growth:,}\n"
-        f"Growth Rate:        {growth_percentage:.2f}%\n"
+        f"Reach:              {report_value(reach)}\n"
+        f"Impressions:        {report_value(impressions)}\n"
+        f"Engagement:         {report_value(engagement)}\n"
+        f"New Followers:      {report_value(new_followers)}\n"
+        f"Lost Followers:     {report_value(lost_followers)}\n"
+        f"Total Followers:    {report_value(total_followers)}\n"
+        f"Follower Growth:    {report_value(follower_growth)}\n"
+        f"Growth Rate:        {f'{growth_percentage:.2f}%' if growth_percentage is not None else 'Not available'}\n"
         f"Performance:        {performance}%\n"
     )
     if top_performing_content:
@@ -291,10 +334,12 @@ def build_campaign_report(campaign: Campaign) -> dict:
         "reach": reach,
         "impressions": impressions,
         "new_followers": new_followers,
+        "lost_followers": lost_followers,
         "total_followers": total_followers,
         "follower_growth": follower_growth,
         "growth_percentage": growth_percentage,
         "audience_growth": follower_growth,
+        "audience_message": audience["message"],
         "performance": performance,
         "audience_timeline": audience_timeline,
         "top_performing_content": top_performing_content,

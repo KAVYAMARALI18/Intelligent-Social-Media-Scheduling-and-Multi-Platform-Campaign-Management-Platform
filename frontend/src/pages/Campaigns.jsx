@@ -71,12 +71,8 @@ function Campaigns() {
       const apiFilters = { ...filters };
       delete apiFilters.platform;
       const query = new URLSearchParams(Object.entries(apiFilters).filter(([, value]) => value));
-      const [response, analyticsResponse, comparisonResponse, accountsResponse] = await Promise.all([
-        fetch(`${API_URL}/campaigns?${query}`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_URL}/campaigns/analytics/overview`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_URL}/campaigns/analytics/comparison`, { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(`${API_URL}/social-accounts/`, { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
+      const headers = { Authorization: `Bearer ${token}` };
+      const response = await fetch(`${API_URL}/campaigns?${query}`, { headers });
 
       if (response.status === 401) {
         handleUnauthorized();
@@ -87,20 +83,91 @@ function Campaigns() {
       if (!response.ok) {
         throw new Error(data.detail || "Unable to load campaigns.");
       }
-      setCampaigns(data);
-      if (accountsResponse.ok) {
-        const connectedAccounts = await accountsResponse.json();
-        setAvailablePlatforms([...new Set(connectedAccounts.map((account) => account.platform).filter(Boolean))]);
+      if (!Array.isArray(data)) {
+        throw new Error("The campaigns API returned an invalid response.");
       }
-      const campaignAccounts = await Promise.all(data.map(async (campaign) => {
-        const accountResponse = await fetch(`${API_URL}/campaigns/${campaign.id}/accounts`, { headers: { Authorization: `Bearer ${token}` } });
-        return [campaign.id, accountResponse.ok ? await accountResponse.json() : []];
+      setCampaigns(data);
+
+      const failedRequests = [];
+      let unauthorized = false;
+      const consumeOptionalResponse = async (result, label, onSuccess) => {
+        if (result.status === "rejected") {
+          failedRequests.push(`${label} (${result.reason?.message || "network error"})`);
+          return;
+        }
+
+        if (result.value.status === 401) {
+          unauthorized = true;
+          return;
+        }
+        if (!result.value.ok) {
+          failedRequests.push(`${label} (HTTP ${result.value.status})`);
+          return;
+        }
+
+        try {
+          onSuccess(await result.value.json());
+        } catch {
+          failedRequests.push(`${label} (invalid response)`);
+        }
+      };
+
+      const optionalResults = await Promise.allSettled([
+        fetch(`${API_URL}/campaigns/analytics/overview`, { headers }),
+        fetch(`${API_URL}/campaigns/analytics/comparison`, { headers }),
+        fetch(`${API_URL}/social-accounts/`, { headers }),
+      ]);
+      await consumeOptionalResponse(optionalResults[0], "Campaign analytics", setAnalytics);
+      await consumeOptionalResponse(optionalResults[1], "Campaign comparison", setComparison);
+      await consumeOptionalResponse(optionalResults[2], "Connected accounts", (accounts) => {
+        if (!Array.isArray(accounts)) {
+          throw new Error("Invalid accounts response");
+        }
+        setAvailablePlatforms([...new Set(accounts.map((account) => account.platform).filter(Boolean))]);
+      });
+
+      if (unauthorized) {
+        handleUnauthorized();
+        return;
+      }
+
+      const campaignAccountResults = await Promise.allSettled(data.map(async (campaign) => {
+        const accountResponse = await fetch(`${API_URL}/campaigns/${campaign.id}/accounts`, { headers });
+        if (!accountResponse.ok) {
+          if (accountResponse.status === 401) {
+            unauthorized = true;
+          }
+          throw new Error(`HTTP ${accountResponse.status}`);
+        }
+        const accounts = await accountResponse.json();
+        if (!Array.isArray(accounts)) {
+          throw new Error("invalid response");
+        }
+        return [campaign.id, accounts];
       }));
-      setCampaignPlatforms(Object.fromEntries(campaignAccounts.map(([id, accounts]) => [id, accounts.map((account) => account.platform).filter(Boolean)])));
-      if (analyticsResponse.ok) setAnalytics(await analyticsResponse.json());
-      if (comparisonResponse.ok) setComparison(await comparisonResponse.json());
+      const campaignAccounts = campaignAccountResults.flatMap((result, index) => {
+        if (result.status === "fulfilled") {
+          return [result.value];
+        }
+        failedRequests.push(`Campaign account details for "${data[index].name}" (${result.reason?.message || "network error"})`);
+        return [];
+      });
+      setCampaignPlatforms(Object.fromEntries(campaignAccounts.map(([id, accounts]) => [
+        id,
+        accounts.map((account) => account.platform).filter(Boolean),
+      ])));
+
+      if (unauthorized) {
+        handleUnauthorized();
+        return;
+      }
+      if (failedRequests.length) {
+        setError(`Campaigns loaded, but some details could not be fetched: ${failedRequests.join("; ")}.`);
+      }
     } catch (requestError) {
-      setError(requestError.message || "Unable to load campaigns.");
+      setError(requestError.message === "Failed to fetch"
+        ? `Unable to connect to the API at ${API_URL}. Check that the backend server is running and try again.`
+        : requestError.message || "Unable to load campaigns.");
     } finally {
       setLoading(false);
     }
@@ -283,7 +350,7 @@ function Campaigns() {
         <section className="campaign-analytics-panel" aria-label="Campaign ROI comparison panel">
           <div className="campaigns-panel-heading">
             <div>
-              <h2>ROI &amp; campaign comparison · modeled estimates</h2>
+              <h2>Campaign financial comparison · recorded data</h2>
               <span>{comparison.summary.total_campaigns ?? 0} campaign{(comparison.summary.total_campaigns ?? 0) === 1 ? "" : "s"}</span>
             </div>
             <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
@@ -293,9 +360,14 @@ function Campaigns() {
             </div>
           </div>
           <div className="campaign-metric-grid">
-            {[["Total Cost", `₹${Number(comparison.summary.total_cost ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`], ["Total Revenue", `₹${Number(comparison.summary.total_revenue ?? 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`], ["Average ROI", `${Number(comparison.summary.average_roi ?? 0).toFixed(2)}%`], ["Best Campaign", comparison.summary.best_campaign?.name || "N/A"]].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value ?? 0}</strong></div>)}
+            {[
+              ["Total Cost", comparison.summary.total_cost == null ? "Not tracked" : `₹${Number(comparison.summary.total_cost).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`],
+              ["Total Revenue", comparison.summary.total_revenue == null ? "Not tracked" : `₹${Number(comparison.summary.total_revenue).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`],
+              ["Average ROI", comparison.summary.average_roi == null ? "Not tracked" : `${Number(comparison.summary.average_roi).toFixed(2)}%`],
+              ["Best Campaign", comparison.summary.best_campaign?.name === "N/A" ? "Not available" : comparison.summary.best_campaign?.name || "Not available"],
+            ].map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}
           </div>
-          <div className="campaign-performance-chart" aria-label="Campaign ROI comparison chart">
+          {comparison.comparison.some((entry) => entry.roi != null) ? <div className="campaign-performance-chart" aria-label="Campaign ROI comparison chart">
             {comparison.comparison.map((item) => {
               const maxRoi = Math.max(...comparison.comparison.map((entry) => Number(entry.roi || 0)), 1);
               const width = Math.max(12, (Number(item.roi || 0) / maxRoi) * 100);
@@ -303,13 +375,13 @@ function Campaigns() {
                 <div className="performance-bar" key={item.campaign_id}>
                   <div>
                     <span>{item.name}</span>
-                    <strong>{Number(item.roi || 0).toFixed(2)}% ROI</strong>
+                    <strong>{item.roi == null ? "Not tracked" : `${Number(item.roi).toFixed(2)}% ROI`}</strong>
                   </div>
                   <i style={{ "--bar-size": `${Math.min(100, width)}%` }} />
                 </div>
               );
             })}
-          </div>
+          </div> : <p className="campaigns-empty">ROI is unavailable until actual campaign revenue is recorded.</p>}
           <div className="campaign-roi-table-wrap">
             <table className="campaign-roi-table">
               <thead>
@@ -325,10 +397,10 @@ function Campaigns() {
                 {comparison.comparison.map((item) => (
                   <tr key={item.campaign_id}>
                     <td>{item.name}</td>
-                    <td>₹{Number(item.cost || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
-                    <td>₹{Number(item.revenue || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</td>
-                    <td>{Number(item.roi || 0).toFixed(2)}%</td>
-                    <td>{Number(item.reach || 0).toLocaleString("en-US")}</td>
+                    <td>{item.cost == null ? "Not tracked" : `₹${Number(item.cost).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`}</td>
+                    <td>{item.revenue == null ? "Not tracked" : `₹${Number(item.revenue).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`}</td>
+                    <td>{item.roi == null ? "Not tracked" : `${Number(item.roi).toFixed(2)}%`}</td>
+                    <td>{item.reach == null ? "Not available" : Number(item.reach).toLocaleString("en-US")}</td>
                   </tr>
                 ))}
               </tbody>

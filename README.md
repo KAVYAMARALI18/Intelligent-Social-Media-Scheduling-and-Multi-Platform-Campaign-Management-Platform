@@ -140,6 +140,16 @@ year and monthly buckets for longer ranges. Engagement, reach, impressions,
 and similar metrics are reported as unavailable until the connected platforms
 provide actual metric data; the analytics UI does not estimate them.
 
+Instagram is the only provider with post and follower metric synchronization
+currently implemented. Published Instagram post metrics and follower counts
+are captured once daily by the existing scheduler. Historical charts use those
+recorded snapshots and therefore begin only after collection starts; the app
+does not reconstruct earlier history. Engagement is the provider's recorded
+engagement value (or likes plus comments when both values are present), and
+engagement rate is calculated only when both engagement and a non-zero reach
+value are available. Missing or unsupported provider metrics remain null.
+Revenue and ROI remain unavailable until actual revenue data is recorded.
+
 The Analytics page can export the active date, platform, and campaign filters
 as CSV or Excel (`.xlsx`) using the authenticated `GET /analytics/export`
 endpoint. Choose `post_details`, `platform_summary`, or `campaign_summary`

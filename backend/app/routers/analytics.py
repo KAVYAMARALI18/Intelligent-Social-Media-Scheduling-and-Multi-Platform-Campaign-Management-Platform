@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 import csv
 import logging
@@ -15,8 +16,14 @@ from starlette.responses import Response
 from app.core.security import get_current_user
 from app.database.postgres import SessionLocal
 from app.models.campaign import Campaign
+from app.models.follower_snapshot import FollowerSnapshot
 from app.models.post import Post
+from app.models.post_metric_snapshot import PostMetricSnapshot
 from app.models.social_account import SocialAccount
+from app.services.instagram_analytics import (
+    capture_daily_follower_snapshots,
+    get_instagram_post_metrics,
+)
 
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
@@ -55,11 +62,13 @@ def _get_analytics_data(
         post_query = post_query.filter(Post.campaign_id == campaign_id)
     if start_date is not None:
         post_query = post_query.filter(
-            Post.published_at >= datetime.combine(start_date, datetime.min.time())
+            func.coalesce(Post.published_at, Post.created_at)
+            >= datetime.combine(start_date, datetime.min.time())
         )
     if end_date is not None:
         post_query = post_query.filter(
-            Post.published_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+            func.coalesce(Post.published_at, Post.created_at)
+            < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
         )
     if platform:
         normalized_platform = _normalize_platform(platform)
@@ -74,8 +83,12 @@ def _get_analytics_data(
     return campaigns, posts
 
 
-def _metrics(campaigns: list[Campaign], posts: list[Post]) -> dict:
-    return {
+def _metrics(
+    campaigns: list[Campaign],
+    posts: list[Post],
+    instagram_metrics: dict | None = None,
+) -> dict:
+    values = {
         "reach": None,
         "impressions": None,
         "engagement": None,
@@ -86,6 +99,19 @@ def _metrics(campaigns: list[Campaign], posts: list[Post]) -> dict:
         "shares": None,
         "views": None,
     }
+    instagram_metrics = instagram_metrics or get_instagram_post_metrics(posts)
+    for name in ("reach", "impressions", "engagement", "likes", "comments"):
+        values[name] = instagram_metrics[name]
+    if values["engagement"] is None and (
+        values["likes"] is not None and values["comments"] is not None
+    ):
+        values["engagement"] = values["likes"] + values["comments"]
+    if values["reach"]:
+        values["engagement_rate"] = round(
+            (values["engagement"] or 0) / values["reach"] * 100,
+            2,
+        )
+    return values
 
 
 def _instagram_engagement(posts: list[Post]) -> dict:
@@ -174,8 +200,20 @@ def _performance_rows(campaigns: list[Campaign], posts: list[Post]) -> list[dict
             "posts": len(campaign_posts),
             **metrics,
             "status": campaign.status,
-            "available": False,
-            "message": "Platform engagement metrics are not available from connected accounts.",
+            "available": any(metrics[name] is not None for name in (
+                "reach",
+                "impressions",
+                "engagement",
+                "likes",
+                "comments",
+                "shares",
+                "clicks",
+                "views",
+            )),
+            "message": (
+                "Current Instagram metrics are returned where the connected "
+                "account and post support them. Historical data is not included."
+            ),
         })
     return rows
 
@@ -351,6 +389,7 @@ def export_analytics_report(
     event_date = func.date(event_timestamp)
     query = (
         db.query(
+            Post.id.label("post_id"),
             event_date.label("event_date"),
             SocialAccount.platform.label("platform"),
             status.label("status"),
@@ -388,6 +427,24 @@ def export_analytics_report(
         )
 
     records = query.order_by(event_date.asc(), Post.id.asc()).all()
+    post_ids = [record.post_id for record in records]
+    latest_snapshot_by_post = {}
+    if post_ids:
+        snapshots = (
+            db.query(PostMetricSnapshot)
+            .filter(
+                PostMetricSnapshot.post_id.in_(post_ids),
+                PostMetricSnapshot.snapshot_date <= end_date,
+            )
+            .order_by(
+                PostMetricSnapshot.snapshot_date.desc(),
+                PostMetricSnapshot.captured_at.desc(),
+            )
+            .all()
+        )
+        for snapshot in snapshots:
+            latest_snapshot_by_post.setdefault(snapshot.post_id, snapshot)
+
     rows = []
     if report_type == "post_details":
         for record in records:
@@ -407,6 +464,7 @@ def export_analytics_report(
                 "Status": record_status,
                 "Campaign": record.campaign_name or "",
                 "Campaigns": "",
+                "_post_ids": [record.post_id],
             })
     elif report_type == "platform_summary":
         summaries = {}
@@ -420,6 +478,7 @@ def export_analytics_report(
                     "Scheduled Posts": 0,
                     "Failed Posts": 0,
                     "Campaigns": set(),
+                    "_post_ids": set(),
                 },
             )
             record_status = (record.status or "").lower()
@@ -428,6 +487,7 @@ def export_analytics_report(
                 summary[f"{record_status.title()} Posts"] += 1
             if record.campaign_name:
                 summary["Campaigns"].add(record.campaign_name)
+            summary["_post_ids"].add(record.post_id)
         rows = [
             {
                 "Date": f"{start_date.isoformat()} to {end_date.isoformat()}",
@@ -439,6 +499,7 @@ def export_analytics_report(
                 "Status": "",
                 "Campaign": "",
                 "Campaigns": ", ".join(sorted(summary["Campaigns"])),
+                "_post_ids": summary["_post_ids"],
             }
             for platform_name, summary in sorted(summaries.items())
         ]
@@ -456,6 +517,7 @@ def export_analytics_report(
                     "Scheduled Posts": 0,
                     "Failed Posts": 0,
                     "Platforms": set(),
+                    "_post_ids": set(),
                 },
             )
             record_status = (record.status or "").lower()
@@ -466,6 +528,7 @@ def export_analytics_report(
                 summary["Platforms"].add(
                     _normalize_platform(record.platform) or record.platform
                 )
+            summary["_post_ids"].add(record.post_id)
         rows = [
             {
                 "Date": f"{start_date.isoformat()} to {end_date.isoformat()}",
@@ -477,6 +540,7 @@ def export_analytics_report(
                 "Status": "",
                 "Campaign": summary["Campaign"],
                 "Campaigns": "",
+                "_post_ids": summary["_post_ids"],
             }
             for _, summary in sorted(summaries.items())
         ]
@@ -503,11 +567,44 @@ def export_analytics_report(
         "Campaigns",
         *unavailable_metrics,
     ]
+    snapshot_metric_names = {
+        "Reach": "reach",
+        "Impressions": "impressions",
+        "Engagement": "engagement",
+        "Likes": "likes",
+        "Comments": "comments",
+        "Shares": "shares",
+        "Clicks": "clicks",
+        "Views": "views",
+    }
+    for row in rows:
+        post_snapshot_ids = row.pop("_post_ids", [])
+        if isinstance(post_snapshot_ids, set):
+            post_snapshot_ids = sorted(post_snapshot_ids)
+        for export_name, metric_name in snapshot_metric_names.items():
+            values = []
+            for post_id in post_snapshot_ids:
+                snapshot = latest_snapshot_by_post.get(post_id)
+                value = getattr(snapshot, metric_name, None) if snapshot else None
+                if (
+                    metric_name == "engagement"
+                    and value is None
+                    and snapshot
+                    and snapshot.likes is not None
+                    and snapshot.comments is not None
+                ):
+                    value = snapshot.likes + snapshot.comments
+                if value is not None:
+                    values.append(value)
+            row[export_name] = (
+                sum(values)
+                if post_snapshot_ids and len(values) == len(post_snapshot_ids)
+                else "Data unavailable"
+            )
+
     csv_buffer = StringIO(newline="")
     writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames, lineterminator="\r\n")
     writer.writeheader()
-    for row in rows:
-        row.update({metric: "Data unavailable" for metric in unavailable_metrics})
     base_filename = (
         f"socialpilot-analytics-{report_type}-{start_date.isoformat()}-"
         f"{end_date.isoformat()}"
@@ -803,10 +900,15 @@ def get_overview(
     campaigns, posts = _get_analytics_data(
         db, current_user_id, start_date, end_date, campaign_id, platform
     )
+    instagram_metrics = get_instagram_post_metrics(posts)
     return {
-        **_metrics(campaigns, posts),
+        **_metrics(campaigns, posts, instagram_metrics),
         "audience_growth": None,
-        "metric_source": "unavailable from connected platforms",
+        "metric_source": (
+            "Instagram Graph API (current post metrics)"
+            if instagram_metrics["available"]
+            else "unavailable from connected platforms"
+        ),
         "audience_data_available": False,
         "filters": _filters(start_date, end_date, campaign_id, platform),
     }
@@ -825,54 +927,92 @@ def get_engagement(
     campaigns, posts = _get_analytics_data(
         db, current_user_id, start_date, end_date, campaign_id, platform
     )
-    metrics = _metrics(campaigns, posts)
-    instagram_metrics = _instagram_engagement(posts)
-    metrics["likes"] = instagram_metrics["likes"]
-    metrics["comments"] = instagram_metrics["comments"]
-    if metrics["likes"] is not None or metrics["comments"] is not None:
-        metrics["engagement"] = (
-            (metrics["likes"] or 0) + (metrics["comments"] or 0)
-        )
-    metric_names = ("likes", "comments", "shares", "clicks", "views", "reach", "impressions")
-    selected_metric = metric if metric in metric_names else "reach"
-    selected_metric_available = (
-        instagram_metrics["likes"] is not None
-        if selected_metric == "likes"
-        else instagram_metrics["comments"] is not None
-        if selected_metric == "comments"
-        else False
+    instagram_metrics = get_instagram_post_metrics(posts)
+    metrics = _metrics(campaigns, posts, instagram_metrics)
+    metric_names = (
+        "likes",
+        "comments",
+        "shares",
+        "clicks",
+        "views",
+        "reach",
+        "impressions",
+        "engagement",
     )
-    if selected_metric_available:
-        message = (
-            "Current Instagram engagement counts grouped by post publication date. "
-            "Other platforms and historical snapshots are not included."
+    selected_metric = metric if metric in metric_names else "reach"
+    selected_metric_available = metrics.get(selected_metric) is not None
+    range_end = end_date or date.today()
+    range_start = start_date or range_end - timedelta(days=29)
+    post_ids = [post.id for post in posts]
+    snapshots = (
+        db.query(PostMetricSnapshot)
+        .filter(
+            PostMetricSnapshot.post_id.in_(post_ids),
+            PostMetricSnapshot.snapshot_date >= range_start,
+            PostMetricSnapshot.snapshot_date <= range_end,
         )
-        if instagram_metrics["failed_posts"]:
-            message += (
-                f" Metrics could not be fetched for "
-                f"{instagram_metrics['failed_posts']} Instagram post(s)."
-            )
-    elif selected_metric in {"likes", "comments"} and instagram_metrics["failed_posts"]:
+        .order_by(PostMetricSnapshot.snapshot_date.asc())
+        .all()
+        if post_ids
+        else []
+    )
+    timeline_by_date: dict[date, dict] = {}
+    for snapshot in snapshots:
+        day = timeline_by_date.setdefault(
+            snapshot.snapshot_date,
+            {"date": snapshot.snapshot_date.isoformat()},
+        )
+        for metric_name in metric_names:
+            value = getattr(snapshot, metric_name)
+            if metric_name == "engagement" and value is None:
+                likes = snapshot.likes
+                comments = snapshot.comments
+                if likes is not None and comments is not None:
+                    value = likes + comments
+            if value is not None:
+                day[metric_name] = day.get(metric_name, 0) + value
+    timeline = [timeline_by_date[key] for key in sorted(timeline_by_date)]
+    history_available = any(
+        point.get(selected_metric) is not None for point in timeline
+    )
+
+    if history_available:
         message = (
-            "Instagram engagement could not be fetched for "
+            "Historical Instagram metrics are daily snapshots. "
+            "Other platforms are not included."
+        )
+    elif selected_metric_available:
+        message = (
+            "Current Instagram post metrics are available, but historical "
+            "snapshots are not yet available. Daily collection has started; "
+            "history will appear after snapshots are collected on multiple dates."
+        )
+    elif instagram_metrics["failed_posts"]:
+        message = (
+            f"Instagram insights could not be fetched for "
             f"{instagram_metrics['failed_posts']} post(s). Reconnect Instagram "
-            "from Social Accounts to grant the current Instagram permissions, "
+            "from Social Accounts and grant Instagram Insights permission, "
             "then refresh analytics."
         )
     else:
         message = (
-            "Only current Instagram likes and comments are available; "
-            "historical engagement data and other metrics are not provided."
+            f"{selected_metric.title()} is not available for the selected posts "
+            "or connected platforms."
         )
 
     return {
         "metrics": metrics,
-        "timeline": instagram_metrics["timeline"] if selected_metric_available else [],
+        "timeline": timeline if history_available else [],
         "selected_metric": selected_metric,
         "available": selected_metric_available,
+        "history_available": history_available,
+        "last_synced_at": max(
+            (snapshot.captured_at for snapshot in snapshots),
+            default=None,
+        ),
         "message": message,
         "metric_source": (
-            "Instagram Graph API (current post totals)"
+            "Instagram Graph API (current post insights)"
             if instagram_metrics["available"]
             else "unavailable from connected platforms"
         ),
@@ -890,14 +1030,136 @@ def get_audience(
     db: Session = Depends(get_db),
 ):
     _get_analytics_data(db, current_user_id, start_date, end_date, campaign_id, platform)
+    selected_platform = _normalize_platform(platform)
+    if selected_platform and selected_platform != "Instagram":
+        return {
+            "current_followers": None,
+            "new_followers": None,
+            "lost_followers": None,
+            "net_growth": None,
+            "growth_percentage": None,
+            "available": False,
+            "last_synced_at": None,
+            "message": "Follower snapshots are currently collected for Instagram accounts only.",
+            "filters": _filters(start_date, end_date, campaign_id, platform),
+        }
+
+    captured = capture_daily_follower_snapshots(db, user_id=current_user_id)
+    range_end = end_date or date.today()
+    range_start = start_date or range_end - timedelta(days=29)
+    account_ids_query = db.query(SocialAccount.id).filter(
+        SocialAccount.user_id == current_user_id,
+        func.lower(SocialAccount.platform) == "instagram",
+        SocialAccount.access_token.isnot(None),
+        func.trim(SocialAccount.access_token) != "",
+    )
+    account_ids = [row[0] for row in account_ids_query.all()]
+    snapshots = (
+        db.query(FollowerSnapshot)
+        .filter(
+            FollowerSnapshot.social_account_id.in_(account_ids),
+            FollowerSnapshot.snapshot_date >= range_start,
+            FollowerSnapshot.snapshot_date <= range_end,
+        )
+        .order_by(FollowerSnapshot.snapshot_date.asc())
+        .all()
+        if account_ids
+        else []
+    )
+    snapshots_by_account: dict[int, dict[date, int]] = defaultdict(dict)
+    for snapshot in snapshots:
+        snapshots_by_account[snapshot.social_account_id][
+            snapshot.snapshot_date
+        ] = snapshot.followers_count
+    latest_snapshots = (
+        db.query(FollowerSnapshot)
+        .filter(
+            FollowerSnapshot.social_account_id.in_(account_ids),
+            FollowerSnapshot.snapshot_date <= range_end,
+        )
+        .order_by(FollowerSnapshot.snapshot_date.desc())
+        .all()
+        if account_ids
+        else []
+    )
+    latest_by_account = {}
+    for snapshot in latest_snapshots:
+        latest_by_account.setdefault(
+            snapshot.social_account_id,
+            snapshot.followers_count,
+        )
+    latest_by_account.update({
+        account_id: count
+        for account_id, count in captured.items()
+        if account_id in account_ids
+    })
+    current_followers = (
+        sum(latest_by_account.values())
+        if account_ids and len(latest_by_account) == len(account_ids)
+        else None
+    )
+
+    daily_totals: dict[date, int] = defaultdict(int)
+    if account_ids and all(
+        account_id in snapshots_by_account for account_id in account_ids
+    ):
+        common_dates = set.intersection(
+            *(set(snapshots_by_account[account_id]) for account_id in account_ids)
+        )
+        for snapshot_date in common_dates:
+            if range_start <= snapshot_date <= range_end:
+                daily_totals[snapshot_date] = sum(
+                    snapshots_by_account[account_id][snapshot_date]
+                    for account_id in account_ids
+                )
+    ordered_days = sorted(daily_totals)
+    if len(ordered_days) >= 2:
+        starting_followers = daily_totals[ordered_days[0]]
+        ending_followers = daily_totals[ordered_days[-1]]
+        net_growth = ending_followers - starting_followers
+        new_followers = max(net_growth, 0)
+        lost_followers = max(-net_growth, 0)
+        growth_percentage = (
+            round(net_growth / starting_followers * 100, 2)
+            if starting_followers
+            else None
+        )
+        available = True
+        message = (
+            f"Follower change measured from {ordered_days[0].isoformat()} "
+            f"through {ordered_days[-1].isoformat()}."
+        )
+    else:
+        new_followers = lost_followers = net_growth = growth_percentage = None
+        available = False
+        if not account_ids:
+            message = (
+                "Connect an Instagram account with follower insights enabled "
+                "to track audience growth."
+            )
+        elif not latest_by_account:
+            message = (
+                "Could not retrieve follower counts from Instagram. Reconnect "
+                "the account and confirm insights access."
+            )
+        else:
+            message = (
+                "Follower history is being collected. Audience growth will "
+                "appear after snapshots are available on at least two dates."
+            )
+
     return {
-        "current_followers": None,
-        "new_followers": None,
-        "lost_followers": None,
-        "net_growth": None,
-        "growth_percentage": None,
-        "available": False,
-        "message": "Follower history is not tracked for connected accounts yet.",
+        "current_followers": current_followers,
+        "new_followers": new_followers,
+        "lost_followers": lost_followers,
+        "net_growth": net_growth,
+        "growth_percentage": growth_percentage,
+        "available": available,
+        "last_synced_at": max(
+            (snapshot.snapshot_date for snapshot in latest_snapshots),
+            default=None,
+        ),
+        "message": message,
         "filters": _filters(start_date, end_date, campaign_id, platform),
     }
 

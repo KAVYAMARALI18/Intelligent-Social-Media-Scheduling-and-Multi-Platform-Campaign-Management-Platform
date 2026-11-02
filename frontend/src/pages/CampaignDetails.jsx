@@ -4,6 +4,8 @@ import "./CampaignDetails.css";
 import "./CampaignWorkspace.css";
 
 const API_URL = "http://127.0.0.1:8000";
+const formatMetric = (value) => value == null ? "Not available" : Number(value).toLocaleString("en-US");
+const formatPercentage = (value) => value == null ? "Not available" : `${Number(value).toFixed(2)}%`;
 
 function formatDate(value) {
   if (!value) return "-";
@@ -147,35 +149,41 @@ function CampaignDetails() {
           <section className="campaign-report-panel">
             <div className="campaign-related-heading">
               <h2>Audience growth & performance report</h2>
-              <span>{report.total_followers?.toLocaleString?.("en-US") ?? report.audience_growth ?? 0}</span>
+              <span>{formatMetric(report.total_followers)}</span>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "12px", marginTop: "18px" }}>
               <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
                 <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>New followers</div>
-                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{(report.new_followers ?? 0).toLocaleString("en-US")}</strong>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatMetric(report.new_followers)}</strong>
+              </div>
+              <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
+                <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>Lost followers</div>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatMetric(report.lost_followers)}</strong>
               </div>
               <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
                 <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>Total followers</div>
-                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{(report.total_followers ?? 0).toLocaleString("en-US")}</strong>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatMetric(report.total_followers)}</strong>
               </div>
               <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
                 <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>Growth</div>
-                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{(report.follower_growth ?? 0).toLocaleString("en-US")}</strong>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatMetric(report.follower_growth)}</strong>
               </div>
               <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
                 <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>Growth %</div>
-                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{Number(report.growth_percentage ?? 0).toFixed(2)}%</strong>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatPercentage(report.growth_percentage)}</strong>
               </div>
               <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
                 <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>Reach</div>
-                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{(report.reach ?? 0).toLocaleString("en-US")}</strong>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatMetric(report.reach)}</strong>
               </div>
               <div style={{ padding: "14px", background: "rgba(13, 30, 27, 0.7)", border: "1px solid #23443e", borderRadius: "8px" }}>
                 <div style={{ color: "#6f9289", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase" }}>Impressions</div>
-                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{(report.impressions ?? 0).toLocaleString("en-US")}</strong>
+                <strong style={{ display: "block", marginTop: "8px", color: "#ebfff7", fontSize: "22px" }}>{formatMetric(report.impressions)}</strong>
               </div>
             </div>
+
+            {!report.audience_timeline?.length && <p className="reports-note">{report.audience_message || "Historical follower data is not available yet."}</p>}
 
             {report.audience_timeline?.length > 0 && (
               <div style={{ marginTop: "24px" }}>
@@ -196,11 +204,11 @@ function CampaignDetails() {
                       {report.audience_timeline.map((point) => (
                         <tr key={point.date} style={{ borderBottom: "1px solid rgba(32, 67, 62, 0.6)" }}>
                           <td style={{ padding: "10px 8px" }}>{point.date}</td>
-                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{(point.followers ?? 0).toLocaleString("en-US")}</td>
-                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{(point.new_followers ?? 0).toLocaleString("en-US")}</td>
-                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{Number(point.growth_percentage ?? 0).toFixed(2)}%</td>
-                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{(point.reach ?? 0).toLocaleString("en-US")}</td>
-                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{(point.impressions ?? 0).toLocaleString("en-US")}</td>
+                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{formatMetric(point.followers)}</td>
+                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{formatMetric(point.new_followers)}</td>
+                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{formatPercentage(point.growth_percentage)}</td>
+                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{formatMetric(point.reach)}</td>
+                          <td style={{ textAlign: "right", padding: "10px 8px" }}>{formatMetric(point.impressions)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -217,7 +225,7 @@ function CampaignDetails() {
                     <li key={`${item.content}-${index}`} style={{ padding: "12px 14px", border: "1px solid #23443e", borderRadius: "8px", background: "rgba(13, 30, 27, 0.7)" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", marginBottom: "6px", color: "#dfeae6" }}>
                         <strong>{item.platform || "Social"}</strong>
-                        <span style={{ color: "#83dec4", fontWeight: 700 }}>{(item.engagement_score ?? 0).toLocaleString("en-US")}</span>
+                        <span style={{ color: "#83dec4", fontWeight: 700 }}>{formatMetric(item.engagement_score)}</span>
                       </div>
                       <div style={{ color: "#b6d1c8", lineHeight: 1.5 }}>{item.content}</div>
                     </li>
@@ -225,6 +233,8 @@ function CampaignDetails() {
                 </ul>
               </div>
             )}
+
+            {!report.top_performing_content?.length && <p className="reports-note">Top-performing posts will appear after actual post metrics have been synchronized.</p>}
 
             <pre style={{ marginTop: "22px" }}>{report.report_text}</pre>
           </section>

@@ -5,7 +5,15 @@ from sqlalchemy import pool
 
 from alembic import context
 from app.database.postgres import Base, engine
-from app.models import campaign, post, publishing_log, social_account, user
+from app.models import (
+    campaign,
+    follower_snapshot,
+    post,
+    post_metric_snapshot,
+    publishing_log,
+    social_account,
+    user,
+)
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

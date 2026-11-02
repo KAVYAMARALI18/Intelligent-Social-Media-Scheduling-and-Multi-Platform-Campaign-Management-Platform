@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,10 @@ from app.database.postgres import SessionLocal
 from app.models.post import Post
 from app.models.social_account import SocialAccount
 from app.models.publishing_log import PublishingLog
+from app.services.instagram_analytics import (
+    capture_daily_follower_snapshots,
+    capture_daily_post_metric_snapshots,
+)
 from app.services.publisher import publish_to_social_media
 
 
@@ -16,6 +21,7 @@ from app.services.publisher import publish_to_social_media
 # ============================================================
 
 INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -591,6 +597,22 @@ scheduler = BackgroundScheduler(
 )
 
 
+def _capture_daily_follower_snapshots():
+    db = SessionLocal()
+    try:
+        capture_daily_follower_snapshots(db)
+    except Exception:
+        logger.exception("Daily Instagram follower snapshot collection failed")
+        db.rollback()
+    try:
+        capture_daily_post_metric_snapshots(db)
+    except Exception:
+        logger.exception("Daily Instagram post metric snapshot collection failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 scheduler.add_job(
     process_scheduled_posts,
 
@@ -605,6 +627,17 @@ scheduler.add_job(
     max_instances=1,
 
     coalesce=True
+)
+
+scheduler.add_job(
+    _capture_daily_follower_snapshots,
+    "cron",
+    hour=0,
+    minute=10,
+    id="daily_follower_snapshots_job",
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True,
 )
 
 

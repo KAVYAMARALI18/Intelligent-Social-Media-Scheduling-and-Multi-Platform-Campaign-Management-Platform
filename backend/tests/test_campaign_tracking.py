@@ -3,7 +3,9 @@ from decimal import Decimal
 
 from app.main import app
 from app.models.campaign import Campaign
+from app.models.follower_snapshot import FollowerSnapshot
 from app.models.post import Post
+from app.models.post_metric_snapshot import PostMetricSnapshot
 from app.models.social_account import SocialAccount
 from app.services.campaign_service import (
     build_campaign_analytics,
@@ -63,6 +65,10 @@ def test_build_campaign_report_includes_report_summary():
     assert report["published_posts"] == 2
     assert report["failed_posts"] == 1
     assert report["performance"] > 0
+    assert report["reach"] is None
+    assert report["total_followers"] is None
+    assert report["audience_timeline"] == []
+    assert "Not available" in report["report_text"]
     assert "Campaign Report" in report["report_text"]
 
 
@@ -75,9 +81,12 @@ def test_build_campaign_report_includes_audience_growth_metrics():
         start_date=date(2026, 7, 1),
         end_date=date(2026, 7, 15),
     )
-    campaign.social_accounts = [
-        SocialAccount(id=10, user_id=7, platform="instagram", username="demo")
+    account = SocialAccount(id=10, user_id=7, platform="instagram", username="demo")
+    account.follower_snapshots = [
+        FollowerSnapshot(snapshot_date=date(2026, 7, 1), followers_count=100),
+        FollowerSnapshot(snapshot_date=date(2026, 7, 15), followers_count=112),
     ]
+    campaign.social_accounts = [account]
     campaign.posts = [
         Post(
             id=1,
@@ -86,7 +95,20 @@ def test_build_campaign_report_includes_audience_growth_metrics():
             content="Launch announcement and product teaser",
             status="published",
             social_account_id=10,
+            social_account=account,
             published_at=datetime(2026, 7, 3, 12, 0, 0),
+            metric_snapshots=[
+                PostMetricSnapshot(
+                    post_id=1,
+                    platform="Instagram",
+                    snapshot_date=date(2026, 7, 10),
+                    reach=80,
+                    impressions=100,
+                    engagement=8,
+                    likes=5,
+                    comments=3,
+                )
+            ],
         ),
         Post(
             id=2,
@@ -95,18 +117,31 @@ def test_build_campaign_report_includes_audience_growth_metrics():
             content="Behind the scenes content for the campaign",
             status="published",
             social_account_id=10,
+            social_account=account,
             published_at=datetime(2026, 7, 8, 12, 0, 0),
+            metric_snapshots=[
+                PostMetricSnapshot(
+                    post_id=2,
+                    platform="Instagram",
+                    snapshot_date=date(2026, 7, 10),
+                    reach=120,
+                    impressions=140,
+                    engagement=12,
+                    likes=8,
+                    comments=4,
+                )
+            ],
         ),
     ]
 
     report = build_campaign_report(campaign)
 
-    assert report["new_followers"] >= 0
-    assert report["total_followers"] > 0
-    assert report["follower_growth"] >= 0
-    assert report["growth_percentage"] >= 0
-    assert report["reach"] > 0
-    assert report["impressions"] > 0
+    assert report["new_followers"] == 12
+    assert report["total_followers"] == 112
+    assert report["follower_growth"] == 12
+    assert report["growth_percentage"] == 12.0
+    assert report["reach"] == 200
+    assert report["impressions"] == 240
     assert len(report["audience_timeline"]) >= 2
     assert len(report["top_performing_content"]) >= 1
 
@@ -124,21 +159,85 @@ def test_build_campaign_analytics_aggregates_engagement():
         SocialAccount(id=10, user_id=7, platform="instagram", username="demo")
     ]
     campaign.posts = [
-        Post(id=1, user_id=7, campaign_id=4, content="A", status="published", social_account_id=10),
-        Post(id=2, user_id=7, campaign_id=4, content="B", status="published", social_account_id=10),
+        Post(
+            id=1,
+            user_id=7,
+            campaign_id=4,
+            content="A",
+            status="published",
+            social_account_id=10,
+            metric_snapshots=[
+                PostMetricSnapshot(
+                    platform="Instagram",
+                    snapshot_date=date(2026, 7, 10),
+                    reach=100,
+                    impressions=140,
+                    likes=10,
+                    comments=5,
+                    engagement=15,
+                )
+            ],
+        ),
+        Post(
+            id=2,
+            user_id=7,
+            campaign_id=4,
+            content="B",
+            status="published",
+            social_account_id=10,
+            metric_snapshots=[
+                PostMetricSnapshot(
+                    platform="Instagram",
+                    snapshot_date=date(2026, 7, 10),
+                    reach=80,
+                    impressions=100,
+                    likes=8,
+                    comments=2,
+                    engagement=10,
+                )
+            ],
+        ),
         Post(id=3, user_id=7, campaign_id=4, content="C", status="failed", social_account_id=10),
     ]
 
     summary = build_campaign_analytics([campaign], campaign.posts)
 
-    assert summary["reach"] > 0
-    assert summary["impressions"] > summary["reach"]
-    assert summary["likes"] > 0
-    assert summary["comments"] > 0
-    assert summary["shares"] > 0
-    assert summary["clicks"] > 0
-    assert summary["views"] > 0
-    assert summary["engagement_rate"] >= 0
+    assert summary["reach"] == 180
+    assert summary["impressions"] == 240
+    assert summary["likes"] == 18
+    assert summary["comments"] == 7
+    assert summary["shares"] is None
+    assert summary["clicks"] is None
+    assert summary["views"] is None
+    assert summary["engagement_rate"] == round(25 / 180 * 100, 2)
+
+
+def test_campaign_analytics_preserves_real_zeros_and_incomplete_metrics():
+    post = Post(
+        id=20,
+        user_id=7,
+        campaign_id=5,
+        content="Post with a real zero likes value",
+        status="published",
+        metric_snapshots=[
+            PostMetricSnapshot(
+                platform="Instagram",
+                snapshot_date=date(2026, 7, 10),
+                reach=0,
+                likes=0,
+                comments=None,
+                engagement=None,
+            )
+        ],
+    )
+
+    metrics = build_campaign_analytics([], [post])
+
+    assert metrics["reach"] == 0
+    assert metrics["likes"] == 0
+    assert metrics["comments"] is None
+    assert metrics["total_engagement"] is None
+    assert metrics["engagement_rate"] is None
 
 
 def test_create_public_media_url_uses_backend_base_url(monkeypatch):
@@ -193,7 +292,7 @@ def test_static_routes_are_declared_before_dynamic_post_id_route():
     assert queue_index < dynamic_index
 
 
-def test_build_campaign_comparison_calculates_roi_for_each_campaign():
+def test_build_campaign_comparison_does_not_invent_revenue_or_roi():
     campaign_a = Campaign(
         id=11,
         user_id=7,
@@ -225,9 +324,10 @@ def test_build_campaign_comparison_calculates_roi_for_each_campaign():
 
     assert comparison["summary"]["total_campaigns"] == 2
     assert comparison["summary"]["total_cost"] > 0
-    assert comparison["summary"]["total_revenue"] >= comparison["summary"]["total_cost"]
-    assert comparison["summary"]["best_campaign"]["name"] in {"Campaign A", "Campaign B"}
-    assert all(entry["roi"] >= -100 for entry in comparison["comparison"])
+    assert comparison["summary"]["total_revenue"] is None
+    assert comparison["summary"]["average_roi"] is None
+    assert comparison["summary"]["best_campaign"]["name"] == "N/A"
+    assert all(entry["roi"] is None for entry in comparison["comparison"])
     assert any(entry["name"] == "Campaign A" for entry in comparison["comparison"])
     assert any(entry["name"] == "Campaign B" for entry in comparison["comparison"])
 

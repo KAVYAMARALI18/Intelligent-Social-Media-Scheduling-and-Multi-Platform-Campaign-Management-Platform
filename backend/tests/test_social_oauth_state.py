@@ -70,7 +70,8 @@ def test_instagram_login_requests_current_business_permissions(monkeypatch):
     )
 
     assert authorization_params["scope"] == [
-        "instagram_business_basic,instagram_business_content_publish"
+        "instagram_business_basic,instagram_business_content_publish,"
+        "instagram_business_manage_insights"
     ]
 
 

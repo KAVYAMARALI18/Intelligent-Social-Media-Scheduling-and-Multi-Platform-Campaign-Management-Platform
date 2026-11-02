@@ -195,4 +195,10 @@ class Post(Base):
         backref="posts",
     )
 
+    metric_snapshots = relationship(
+        "PostMetricSnapshot",
+        back_populates="post",
+        cascade="all, delete-orphan",
+    )
+
     campaign = relationship("Campaign", back_populates="posts")
